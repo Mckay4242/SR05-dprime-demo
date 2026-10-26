@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>d' results</title>
+<script src="config.js"></script>
+<style>
+  :root { --fg:#1d1d1f; --muted:#777; --grid:#e3e3e3; --small:#1f77b4; --large:#ff7f0e; --band:#2ca02c; }
+  html, body { margin:0; background:#fff; color:var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  body { padding:24px 32px; }
+  header { display:flex; align-items:baseline; gap:24px; flex-wrap:wrap; }
+  h1 { margin:0; font-size:2rem; }
+  .stat { font-size:1.15rem; color:var(--muted); }
+  .stat b { color:var(--fg); }
+  .grid { display:grid; grid-template-columns: 1.25fr 1fr; gap:24px; margin-top:16px; }
+  @media (max-width: 900px) { .grid { grid-template-columns:1fr; } }
+  .card h2 { font-size:1.15rem; margin:0 0 6px; font-weight:600; }
+  svg { width:100%; height:auto; display:block; font-family:inherit; }
+  .legend { display:flex; gap:18px; font-size:.95rem; color:var(--muted); margin-top:4px; }
+  .sw { display:inline-block; width:12px; height:12px; border-radius:2px; vertical-align:-1px; margin-right:5px; }
+  footer { margin-top:14px; font-size:.8rem; color:var(--muted); }
+  #msg { color:#c00; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Where did you see the disc?</h1>
+  <span class="stat">participants <b id="n-p">0</b></span>
+  <span class="stat">median d′ <b id="med">–</b></span>
+  <span class="stat" id="excl"></span>
+</header>
+
+<div class="grid">
+  <div class="card">
+    <h2>Detectability d′ at your threshold</h2>
+    <svg id="hist" viewBox="0 0 640 380"></svg>
+    <div class="legend">
+      <span><span class="sw" style="background:var(--small)"></span>small disc (r = 4 px)</span>
+      <span><span class="sw" style="background:var(--large)"></span>large disc (r = 16 px)</span>
+      <span><span class="sw" style="background:var(--band);opacity:.25"></span>Rose criterion, d′ ≈ 3–5</span>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Same person, two discs: contrast vs d′</h2>
+    <svg id="pairs" viewBox="0 0 520 380"></svg>
+    <div class="legend" id="ratio"></div>
+  </div>
+</div>
+
+<footer>
+  <span id="upd"></span> · session <b id="sess"></b> · press <b>i</b> to include missed taps (<span id="inc">off</span>) <span id="msg"></span>
+</footer>
+
+<script>
+(() => {
+  const CFG = window.DPRIME_CONFIG || {};
+  const qs = new URLSearchParams(location.search);
+  const SESSION = qs.get('session') || CFG.session || 'talk';
+  const DEMO = qs.has('demo');
+  const ENDPOINT = CFG.endpoint && CFG.endpoint.startsWith('http') ? CFG.endpoint : null;
+  const REFRESH_MS = 3000;
+  const SMALL = 4;
+  let includeMissed = false, lastRows = [];
+  document.getElementById('sess').textContent = DEMO ? 'demo' : SESSION;
+
+  const NS = 'http://www.w3.org/2000/svg';
+  const el = (tag, attrs, text) => { const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]); if (text !== undefined) e.textContent = text; return e; };
+  const median = a => { if (!a.length) return NaN; const s = [...a].sort((x, y) => x - y), m = s.length >> 1;
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+  const fmt = v => isFinite(v) ? (v >= 10 ? v.toFixed(0) : v.toFixed(1)) : '–';
+
+  // ---------- demo data: simulated observers with Rose-like thresholds ----------
+  function demoRows() {
+    const rows = [], rnd = () => { let u = 0; while (!u) u = Math.random(); return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*Math.random()); };
+    for (let p = 0; p < 15; p++) {
+      const k = Math.exp(Math.log(3.8) + 0.25 * rnd());       // person's criterion
+      for (const [r, npix] of [[4, 49], [16, 797]]) {
+        const d = k * Math.exp(0.2 * rnd()) * (r === 16 ? 1.25 : 1);   // mild size effect (efficiency drop)
+        rows.push({ pid: 'p' + p, radius: r, npix, sigma: 20, dprime: d,
+          amplitude: d * 20 / Math.sqrt(npix), correct: Math.random() < 0.93 ? 1 : 0 });
+      }
+    }
+    return rows;
+  }
+
+  // ---------- histogram ----------
+  function drawHist(rows) {
+    const svg = document.getElementById('hist'); svg.innerHTML = '';
+    const W = 640, H = 380, L = 56, R = 16, Tp = 14, B = 52;
+    const XMAX = 12, BW = 1, nb = XMAX / BW + 1;            // last bin = overflow
+    const cnt = Array.from({ length: nb }, () => [0, 0]);
+    rows.forEach(r => { const b = Math.min(nb - 1, Math.floor(r.dprime / BW)); cnt[b][r.radius == SMALL ? 0 : 1]++; });
+    const cmax = Math.max(4, ...cnt.map(c => c[0] + c[1])), step = Math.ceil(cmax / 6);
+    const ymax = Math.ceil((cmax + 1) / step) * step;   // headroom for the median label
+    const x = v => L + (v / (XMAX + BW)) * (W - L - R);
+    const y = v => H - B - (v / ymax) * (H - B - Tp);
+
+    svg.append(el('rect', { x: x(3), y: Tp, width: x(5) - x(3), height: H - B - Tp, fill: '#2ca02c', opacity: .14 }));
+    for (let t = 0; t <= ymax; t += step) {
+      svg.append(el('line', { x1: L, x2: W - R, y1: y(t), y2: y(t), stroke: '#e3e3e3' }));
+      svg.append(el('text', { x: L - 8, y: y(t) + 5, 'text-anchor': 'end', 'font-size': 14, fill: '#777' }, t));
+    }
+    cnt.forEach((c, b) => {
+      const x0 = x(b * BW) + 2, w = x(BW) - x(0) - 4;
+      svg.append(el('rect', { x: x0, y: y(c[0]), width: w, height: y(0) - y(c[0]), fill: '#1f77b4' }));
+      svg.append(el('rect', { x: x0, y: y(c[0] + c[1]), width: w, height: y(c[0]) - y(c[0] + c[1]), fill: '#ff7f0e' }));
+    });
+    for (let t = 0; t < XMAX; t += 2)
+      svg.append(el('text', { x: x(t), y: H - B + 22, 'text-anchor': 'middle', 'font-size': 14, fill: '#555' }, t));
+    svg.append(el('text', { x: x(XMAX + BW / 2), y: H - B + 22, 'text-anchor': 'middle', 'font-size': 14, fill: '#555' }, '12+'));
+    svg.append(el('text', { x: (L + W - R) / 2, y: H - 10, 'text-anchor': 'middle', 'font-size': 16, fill: '#1d1d1f' }, 'd′ = A·√N / σ'));
+    svg.append(el('text', { x: 16, y: (Tp + H - B) / 2, 'text-anchor': 'middle', 'font-size': 15, fill: '#555',
+      transform: `rotate(-90 16 ${(Tp + H - B) / 2})` }, 'count'));
+    const med = median(rows.map(r => r.dprime));
+    if (isFinite(med)) {
+      const mx = x(Math.min(med, XMAX + BW));
+      svg.append(el('line', { x1: mx, x2: mx, y1: Tp, y2: H - B, stroke: '#1d1d1f', 'stroke-width': 2, 'stroke-dasharray': '6 4' }));
+      svg.append(el('text', { x: mx + 6, y: Tp + 16, 'font-size': 14, fill: '#1d1d1f' }, 'median ' + fmt(med)));
+    }
+  }
+
+  // ---------- paired plot: contrast (left) vs d' (right), same log span ----------
+  function drawPairs(rows) {
+    const svg = document.getElementById('pairs'); svg.innerHTML = '';
+    const W = 520, H = 380, Tp = 30, B = 40, SPAN = 128;    // both y-axes cover a factor of 128
+    const panels = [
+      { key: 'amplitude', title: 'contrast A (grey levels)', lo: 0.5, x0: 60 },
+      { key: 'dprime',    title: 'd′',                       lo: 0.25, x0: 320 }
+    ];
+    const byP = {};
+    rows.forEach(r => { (byP[r.pid] = byP[r.pid] || {})[r.radius == SMALL ? 's' : 'l'] = r; });
+    panels.forEach(p => {
+      const hi = p.lo * SPAN, pw = 170;
+      const y = v => { const t = Math.log(Math.min(hi, Math.max(p.lo, v)) / p.lo) / Math.log(SPAN); return H - B - t * (H - B - Tp); };
+      const xs = p.x0 + 30, xl = p.x0 + pw - 30;
+      for (let v = 0.25; v <= hi * 1.001; v *= 2) {
+        if (v < p.lo * 0.999) continue;
+        svg.append(el('line', { x1: p.x0, x2: p.x0 + pw, y1: y(v), y2: y(v), stroke: '#e3e3e3' }));
+        svg.append(el('text', { x: p.x0 - 6, y: y(v) + 4, 'text-anchor': 'end', 'font-size': 12, fill: '#777' }, v < 1 ? v : v.toFixed(0)));
+      }
+      if (p.key === 'dprime') svg.append(el('rect', { x: p.x0, y: y(5), width: pw, height: y(3) - y(5), fill: '#2ca02c', opacity: .14 }));
+      svg.append(el('text', { x: p.x0 + pw / 2, y: 18, 'text-anchor': 'middle', 'font-size': 15, fill: '#1d1d1f', 'font-weight': 600 }, p.title));
+      svg.append(el('text', { x: xs, y: H - B + 22, 'text-anchor': 'middle', 'font-size': 13, fill: '#1f77b4' }, 'small'));
+      svg.append(el('text', { x: xl, y: H - B + 22, 'text-anchor': 'middle', 'font-size': 13, fill: '#ff7f0e' }, 'large'));
+      Object.values(byP).forEach(pp => {
+        if (pp.s && pp.l) svg.append(el('line', { x1: xs, x2: xl, y1: y(pp.s[p.key]), y2: y(pp.l[p.key]), stroke: '#999', 'stroke-width': 1.2, opacity: .7 }));
+        if (pp.s) svg.append(el('circle', { cx: xs, cy: y(pp.s[p.key]), r: 5, fill: '#1f77b4', opacity: .85 }));
+        if (pp.l) svg.append(el('circle', { cx: xl, cy: y(pp.l[p.key]), r: 5, fill: '#ff7f0e', opacity: .85 }));
+      });
+    });
+    // ratio summary: how much the two sizes differ, in contrast vs in d'
+    const S = rows.filter(r => r.radius == SMALL), Lg = rows.filter(r => r.radius != SMALL);
+    const cr = median(S.map(r => r.amplitude)) / median(Lg.map(r => r.amplitude));
+    const dr = median(S.map(r => r.dprime)) / median(Lg.map(r => r.dprime));
+    document.getElementById('ratio').innerHTML = (S.length && Lg.length)
+      ? `small ÷ large, median contrast: <b>&nbsp;×${fmt(cr)}</b> &nbsp;·&nbsp; median d′: <b>&nbsp;×${fmt(dr)}</b>` : '';
+  }
+
+  function draw(all) {
+    lastRows = all;
+    const rows = all.filter(r => includeMissed || +r.correct === 1).map(r => ({ ...r, dprime: +r.dprime, amplitude: +r.amplitude }));
+    const missed = all.filter(r => +r.correct !== 1).length;
+    document.getElementById('n-p').textContent = new Set(all.map(r => r.pid)).size;
+    document.getElementById('med').textContent = fmt(median(rows.map(r => r.dprime)));
+    document.getElementById('excl').textContent = (!includeMissed && missed) ? `(${missed} missed tap${missed > 1 ? 's' : ''} excluded)` : '';
+    drawHist(rows); drawPairs(rows);
+    document.getElementById('upd').textContent = 'updated ' + new Date().toLocaleTimeString();
+  }
+
+  async function refresh() {
+    const msg = document.getElementById('msg');
+    if (DEMO) { if (!lastRows.length) draw(demoRows()); return; }
+    if (!ENDPOINT) { msg.textContent = '· no endpoint in config.js, try ?demo'; draw([]); return; }
+    try {
+      const res = await fetch(ENDPOINT + '?session=' + encodeURIComponent(SESSION) + '&t=' + Date.now());
+      const js = await res.json();
+      msg.textContent = ''; draw(js.rows || []);
+    } catch (e) { msg.textContent = '· fetch failed, retrying'; }
+  }
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'i') { includeMissed = !includeMissed; document.getElementById('inc').textContent = includeMissed ? 'on' : 'off'; draw(lastRows); }
+    if (e.key === 'r' && DEMO) draw(demoRows());
+  });
+  refresh(); setInterval(refresh, REFRESH_MS);
+})();
+</script>
+</body>
+</html>

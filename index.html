@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Can you see it?</title>
+<script src="config.js"></script>
+<style>
+  :root { --bg:#111; --fg:#eee; --muted:#999; --accent:#4fc3f7; --ok:#66bb6a; --bad:#ef5350; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin:0; background:var(--bg); color:var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  body { display:flex; flex-direction:column; align-items:center; padding:16px; min-height:100vh; }
+  h1 { font-size:1.4rem; margin:8px 0 4px; }
+  p  { line-height:1.45; max-width:440px; margin:6px 0; }
+  .muted { color:var(--muted); font-size:.9rem; }
+  .screen { display:none; flex-direction:column; align-items:center; width:100%; max-width:460px; }
+  .screen.active { display:flex; }
+  #wrap { position:relative; width:min(92vw, 440px); aspect-ratio:1; margin:12px 0; touch-action:none; }
+  canvas { width:100%; height:100%; image-rendering:pixelated; image-rendering:crisp-edges; display:block; }
+  #overlay { position:absolute; inset:0; pointer-events:none; }
+  input[type=range] { width:min(92vw, 440px); height:44px; accent-color:var(--accent); }
+  button { font-size:1.1rem; padding:14px 22px; margin-top:12px; border:0; border-radius:10px;
+    background:var(--accent); color:#002; font-weight:600; width:min(92vw, 440px); }
+  button:disabled { opacity:.35; }
+  .row { display:flex; justify-content:space-between; width:min(92vw,440px); color:var(--muted); font-size:.8rem; }
+  #status { min-height:1.6em; font-weight:600; margin-top:6px; text-align:center; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); }
+</style>
+</head>
+<body>
+
+<section id="s-intro" class="screen active">
+  <h1>Can you see it?</h1>
+  <p>You'll see a noisy image. Somewhere in it is a faint, slightly brighter <b>disc</b>.</p>
+  <p>Slowly move the slider to the right until you can <b>just</b> make out the disc, no further. Then tap <b>"I can see it"</b> and tap on the disc.</p>
+  <p class="muted">Two short rounds, about one minute. Turn screen brightness up, no dark mode filters. Anonymous.</p>
+  <button id="b-start">Start</button>
+</section>
+
+<section id="s-trial" class="screen">
+  <h1 id="t-title">Round 1 of 2</h1>
+  <p id="t-instr" class="muted">Move the slider slowly until you can just see the disc.</p>
+  <div id="wrap">
+    <canvas id="cv" width="256" height="256"></canvas>
+    <svg id="overlay" viewBox="0 0 256 256"></svg>
+  </div>
+  <input id="slider" type="range" min="0" max="1000" step="1" value="0">
+  <div class="row"><span>fainter</span><span>stronger</span></div>
+  <div id="status"></div>
+  <button id="b-see">I can see it</button>
+  <button id="b-next" style="display:none">Next</button>
+</section>
+
+<section id="s-done" class="screen">
+  <h1>Thanks!</h1>
+  <p>Your answers are in. Eyes back on the screen. Your result is coming up in the talk.</p>
+  <p class="muted" id="d-note"></p>
+</section>
+
+<script>
+(() => {
+  // ---------- Stimulus parameters ----------
+  const SIZE  = 256;        // image is SIZE x SIZE pixels
+  const MEAN  = 128;        // background grey level (8-bit)
+  const SIGMA = 20;         // noise std per pixel (grey levels) -> 6.4 sigma headroom, no clipping
+  const RADII = [4, 16];    // small and large disc radius in pixels
+  const AMIN  = 0.25, AMAX = 64, STEPS = 1000;   // log-spaced contrast range shared by both sizes
+  const TAP_TOL = 10;       // tap counts as correct within r + TAP_TOL pixels of centre
+
+  const CFG = window.DPRIME_CONFIG || {};
+  const qs = new URLSearchParams(location.search);
+  const SESSION = qs.get('session') || CFG.session || 'talk';
+  const ENDPOINT = CFG.endpoint && CFG.endpoint.startsWith('http') ? CFG.endpoint : null;
+
+  const pid = Math.random().toString(36).slice(2, 10);
+  const order = Math.random() < 0.5 ? [0, 1] : [1, 0];
+
+  const $ = id => document.getElementById(id);
+  const cv = $('cv'), ctx = cv.getContext('2d'), slider = $('slider'), overlay = $('overlay');
+  const img = ctx.createImageData(SIZE, SIZE);
+
+  const ampFromS = s => AMIN * Math.pow(AMAX / AMIN, s / STEPS);
+  const sFromAmp = a => STEPS * Math.log(a / AMIN) / Math.log(AMAX / AMIN);
+
+  // Standard normal via Box-Muller, pairs cached
+  let spare = null;
+  function randn() {
+    if (spare !== null) { const v = spare; spare = null; return v; }
+    let u = 0, v = 0;
+    while (u === 0) u = Math.random();
+    v = Math.random();
+    const m = Math.sqrt(-2 * Math.log(u));
+    spare = m * Math.sin(2 * Math.PI * v);
+    return m * Math.cos(2 * Math.PI * v);
+  }
+
+  let trialNo = 0, T = null, phase = 'adjust';
+
+  function newTrial(r) {
+    const margin = r + 14;
+    const cx = Math.floor(margin + Math.random() * (SIZE - 2 * margin));
+    const cy = Math.floor(margin + Math.random() * (SIZE - 2 * margin));
+    const mask = new Uint8Array(SIZE * SIZE);
+    let npix = 0;
+    for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) {
+      if ((x - cx) ** 2 + (y - cy) ** 2 <= r * r) { mask[y * SIZE + x] = 1; npix++; }
+    }
+    // Ideal-observer d' for a known binary signal in white Gaussian noise:
+    //   d' = A * sqrt(Npix) / sigma
+    // Start well below threshold: random d' in [0.2, 1.2], expressed as slider position.
+    const startD = 0.2 + Math.random();
+    const startA = startD * SIGMA / Math.sqrt(npix);
+    const s0 = Math.max(0, Math.min(STEPS * 0.5, Math.round(sFromAmp(startA))));
+    return { r, cx, cy, mask, npix, s0, t0: performance.now(), moves: 0 };
+  }
+
+  function dprime(A) { return A * Math.sqrt(T.npix) / SIGMA; }
+
+  function render() {
+    const A = ampFromS(+slider.value);
+    const d = img.data, m = T.mask;
+    for (let i = 0, p = 0; i < m.length; i++, p += 4) {
+      let v = Math.round(MEAN + A * m[i] + SIGMA * randn());
+      v = v < 0 ? 0 : v > 255 ? 255 : v;
+      d[p] = d[p + 1] = d[p + 2] = v; d[p + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  let pending = false;
+  slider.addEventListener('input', () => {
+    if (phase !== 'adjust') return;
+    T.moves++;
+    if (!pending) { pending = true; requestAnimationFrame(() => { pending = false; render(); }); }
+  });
+
+  function startTrial() {
+    const r = RADII[order[trialNo]];
+    T = newTrial(r);
+    phase = 'adjust';
+    overlay.innerHTML = '';
+    slider.disabled = false;
+    slider.value = T.s0;
+    $('t-title').textContent = `Round ${trialNo + 1} of 2`;
+    $('t-instr').textContent = 'Move the slider slowly until you can just see the disc.';
+    $('status').textContent = '';
+    $('status').className = '';
+    $('b-see').style.display = '';
+    $('b-next').style.display = 'none';
+    render();
+  }
+
+  $('b-start').onclick = () => {
+    $('s-intro').classList.remove('active');
+    $('s-trial').classList.add('active');
+    startTrial();
+  };
+
+  $('b-see').onclick = () => {
+    phase = 'tap';
+    slider.disabled = true;
+    $('b-see').style.display = 'none';
+    $('t-instr').textContent = 'Now tap the centre of the disc.';
+  };
+
+  $('wrap').addEventListener('pointerdown', ev => {
+    if (phase !== 'tap') return;
+    phase = 'feedback';
+    const rect = cv.getBoundingClientRect();
+    const x = (ev.clientX - rect.left) / rect.width * SIZE;
+    const y = (ev.clientY - rect.top) / rect.height * SIZE;
+    const dist = Math.hypot(x - T.cx, y - T.cy);
+    const correct = dist <= T.r + TAP_TOL;
+    const A = ampFromS(+slider.value);
+
+    overlay.innerHTML =
+      `<circle cx="${T.cx}" cy="${T.cy}" r="${T.r + 3}" fill="none" stroke="#66bb6a" stroke-width="1.5"/>` +
+      `<circle cx="${x}" cy="${y}" r="3" fill="${correct ? '#66bb6a' : '#ef5350'}"/>`;
+    $('status').textContent = correct ? 'Found it ✓' : 'Missed. The disc was in the green circle.';
+    $('status').className = correct ? 'ok' : 'bad';
+
+    submit({
+      session: SESSION, pid, trial: trialNo + 1, radius: T.r, npix: T.npix, sigma: SIGMA,
+      amplitude: +A.toFixed(4), dprime: +dprime(A).toFixed(4), correct: correct ? 1 : 0,
+      tap_dist: +dist.toFixed(2), start_dprime: +dprime(ampFromS(T.s0)).toFixed(4),
+      adjust_ms: Math.round(performance.now() - T.t0), moves: T.moves,
+      screen_w: window.screen.width, dpr: window.devicePixelRatio || 1
+    });
+
+    $('b-next').textContent = trialNo === 0 ? 'Next round' : 'Finish';
+    $('b-next').style.display = '';
+  });
+
+  $('b-next').onclick = () => {
+    trialNo++;
+    if (trialNo < 2) startTrial();
+    else { $('s-trial').classList.remove('active'); $('s-done').classList.add('active'); }
+  };
+
+  function submit(row) {
+    if (!ENDPOINT) { console.log('No endpoint configured; would submit:', row); $('d-note').textContent = '(test mode: no data sent)'; return; }
+    // text/plain avoids a CORS preflight, which Apps Script does not answer
+    fetch(ENDPOINT, { method: 'POST', mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(row) })
+      .catch(err => console.warn('submit failed', err));
+  }
+})();
+</script>
+</body>
+</html>
