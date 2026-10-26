@@ -67,7 +67,7 @@
   const SIGMA = 20;         // noise std per pixel (grey levels) -> 6.4 sigma headroom, no clipping
   const RADII = [4, 16];    // small and large disc radius in pixels
   const AMIN  = 0.25, AMAX = 64, STEPS = 1000;   // log-spaced contrast range shared by both sizes
-  const TAP_TOL = 10;       // tap counts as correct within r + TAP_TOL pixels of centre
+  const TAP_TOL = Math.round(10 * SIZE / 256);   // tap counts as correct within r + TAP_TOL px; scales with image size
 
   const CFG = window.DPRIME_CONFIG || {};
   const qs = new URLSearchParams(location.search);
@@ -79,6 +79,9 @@
 
   const $ = id => document.getElementById(id);
   const cv = $('cv'), ctx = cv.getContext('2d'), slider = $('slider'), overlay = $('overlay');
+  // Canvas and tap overlay follow SIZE, so changing SIZE above is all that's needed
+  cv.width = cv.height = SIZE;
+  overlay.setAttribute('viewBox', `0 0 ${SIZE} ${SIZE}`);
   const img = ctx.createImageData(SIZE, SIZE);
 
   const ampFromS = s => AMIN * Math.pow(AMAX / AMIN, s / STEPS);
@@ -181,8 +184,8 @@
     const A = ampFromS(+slider.value);
 
     overlay.innerHTML =
-      `<circle cx="${T.cx}" cy="${T.cy}" r="${T.r + 3}" fill="none" stroke="#66bb6a" stroke-width="1.5"/>` +
-      `<circle cx="${x}" cy="${y}" r="3" fill="${correct ? '#66bb6a' : '#ef5350'}"/>`;
+      `<circle cx="${T.cx}" cy="${T.cy}" r="${T.r + 3}" fill="none" stroke="#66bb6a" stroke-width="${SIZE / 170}"/>` +
+      `<circle cx="${x}" cy="${y}" r="${SIZE / 85}" fill="${correct ? '#66bb6a' : '#ef5350'}"/>`;
     $('status').textContent = correct ? 'Found it ✓' : 'Missed. The disc was in the green circle.';
     $('status').className = correct ? 'ok' : 'bad';
 
