@@ -31,10 +31,11 @@
 <body>
 
 <section id="s-intro" class="screen active">
-  <h1>Can you see it?</h1>
+  <h1>Are we an ideal observer?</h1>
   <p>You'll see a noisy image. Somewhere in it is a faint, slightly brighter <b>disc</b>.</p>
   <p>Slowly move the slider to the right until you can <b>just</b> make out the disc, no further. Then tap <b>"I can see it"</b> and tap on the disc.</p>
-  <p class="muted">Two short rounds, about one minute. Turn screen brightness up, no dark mode filters. Anonymous.</p>
+  <p>The slider only moves <b>one way</b>, so go slowly. You can't go back.</p>
+  <p class="muted">Two short rounds, about one minute. Turn screen brightness up. Anonymous.</p>
   <button id="b-start">Start</button>
 </section>
 
@@ -131,6 +132,10 @@
   let pending = false;
   slider.addEventListener('input', () => {
     if (phase !== 'adjust') return;
+    // Ascending only: the slider can never go below the highest value reached so far
+    if (+slider.value < T.maxS) { slider.value = T.maxS; return; }
+    if (+slider.value === T.maxS) return;
+    T.maxS = +slider.value;
     T.moves++;
     if (!pending) { pending = true; requestAnimationFrame(() => { pending = false; render(); }); }
   });
@@ -142,8 +147,9 @@
     overlay.innerHTML = '';
     slider.disabled = false;
     slider.value = T.s0;
+    T.maxS = T.s0;
     $('t-title').textContent = `Round ${trialNo + 1} of 2`;
-    $('t-instr').textContent = 'Move the slider slowly until you can just see the disc.';
+    $('t-instr').textContent = 'Move the slider slowly to the right until you can just see the disc. It can’t go back.';
     $('status').textContent = '';
     $('status').className = '';
     $('b-see').style.display = '';
